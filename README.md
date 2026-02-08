@@ -97,28 +97,44 @@ Ethereum + ENS
 - Node.js 18+  
 - npm or pnpm  
 
-### Install
+### Install and run locally
 
 ```bash
 git clone https://github.com/eth-ensight/ensight-backend.git
-cd ensight-backend
+cd ensight-backend/backend
 npm install
-```
-
-### Run locally
-
-```bash
 npm run dev
 ```
+
+The server runs on `http://localhost:3000`. For **ENS-only** use you do not need any env vars. For **risk lookup** and **ScamSniffer cron** you need Upstash Redis and `CRON_SECRET`; see [backend/README.md](backend/README.md) and copy `backend/.env.example` to `backend/.env`.
+
+### Tests
+
+From `backend/` run `npm test`. Unit tests use mocked RPC and Redis, so no secrets are required.
+
+### Vercel deployment
+
+The repo is structured for Vercel serverless: the Express app lives in `backend/app.js` and is exported from `api/index.js`. Deploy with Vercel; set `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `CRON_SECRET` in the project environment. A daily cron for `/api/cron/scamsniffer-sync` is configured in `vercel.json`; configure the cron to send `Authorization: Bearer <CRON_SECRET>`.
+
+### API overview
+
+- **ENS:** `GET /api/ens/resolve/:name`, `/api/ens/reverse/:address`, `/api/ens/text/:name/:key`, `/api/ens/avatar/:name`, `/api/ens/info/:name`, `/api/ens/contenthash/:name`, `/api/ens/records/:name`, `POST /api/ens/batch`
+- **Risk:** `GET /api/risk/address/:address` — returns `{ flagged, lastUpdated }` from ScamSniffer data in Redis
+- **Cron:** `GET /api/cron/scamsniffer-sync` (Bearer `CRON_SECRET`) — syncs ScamSniffer blacklist to Redis
+- **Graph:** `POST /api/graph/interaction`, `GET /api/graph/address/:address`, `GET /api/graph/address/:address/neighbors`
+
+Full endpoint docs, env vars, and curl examples: [backend/README.md](backend/README.md).
 
 ---
 
 ## 🔐 Environment Variables
 
-```bash
-RPC_URL=<your_rpc_provider>
-PORT=4000
-```
+See [backend/README.md](backend/README.md) and `backend/.env.example`. Summary:
+
+- `PORT` (default 3000), `RPC_URL` (optional)
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (for risk + cron)
+- `CRON_SECRET` (for `/api/cron/scamsniffer-sync`)
+- `SCAMSNIFFER_JSON_URL` (optional override)
 
 ---
 
