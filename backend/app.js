@@ -2,7 +2,7 @@ const express = require('express');
 const { ethers } = require('ethers');
 const cors = require('cors');
 const redisModule = require('./lib/redis');
-const { validateName, validateAddress, normalizeName, STANDARD_TEXT_KEYS } = require('./lib/ens');
+const { validateName, validateAddress, normalizeName, STANDARD_TEXT_KEYS, EXTENDED_TEXT_KEYS } = require('./lib/ens');
 let redis = redisModule.redis;
 let redisConfigured = redisModule.isConfigured;
 if (global.__ENSIGHT_TEST_REDIS__) {
@@ -255,6 +255,120 @@ app.get('/api/ens/info/:name', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get ENS info',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * Get contenthash for an ENS name (IPFS, IPNS, Swarm, Onion, etc.)
+ * GET /api/ens/contenthash/:name
+ * Example: /api/ens/contenthash/vitalik.eth
+ * Returns the raw contenthash bytes and a decoded URI when possible.
+ */
+app.get('/api/ens/contenthash/:name', async (req, res) => {
+  try {
+    const { valid, normalized, error } = validateName(req.params.name);
+    if (!valid) {
+      return res.status(400).json({ error });
+    }
+
+    const resolver = await provider.getResolver(normalized);
+
+    if (!resolver) {
+      return res.status(404).json({
+        error: `No resolver found for "${normalized}"`
+      });
+    }
+
+    const contenthash = await resolver.getContentHash();
+
+    if (!contenthash) {
+      return res.status(404).json({
+        error: `No contenthash set for "${normalized}"`
+      });
+    }
+
+    res.json({
+      name: normalized,
+      contenthash,
+      success: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get contenthash',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * Get all ENS records for a name (extended text records + contenthash + address).
+ * GET /api/ens/records/:name
+ * Example: /api/ens/records/vitalik.eth
+ * Returns a comprehensive dump of all available ENS records.
+ */
+app.get('/api/ens/records/:name', async (req, res) => {
+  try {
+    const { valid, normalized, error } = validateName(req.params.name);
+    if (!valid) {
+      return res.status(400).json({ error });
+    }
+
+    const resolver = await provider.getResolver(normalized);
+    const address = await provider.resolveName(normalized);
+
+    if (!resolver && !address) {
+      return res.status(404).json({
+        error: `ENS name "${normalized}" not found`
+      });
+    }
+
+    const records = {
+      name: normalized,
+      address: address || null,
+      resolver: resolver ? resolver.address : null,
+      contenthash: null,
+      avatar: null,
+      textRecords: {},
+    };
+
+    if (resolver) {
+      // Contenthash
+      try {
+        records.contenthash = await resolver.getContentHash();
+      } catch (e) {
+        records.contenthash = null;
+      }
+
+      // Avatar
+      try {
+        const avatar = await resolver.getAvatar();
+        records.avatar = avatar ? avatar.url : null;
+      } catch (e) {
+        records.avatar = null;
+      }
+
+      // Extended text records — fetch all known keys
+      for (const key of EXTENDED_TEXT_KEYS) {
+        try {
+          const value = await resolver.getText(key);
+          if (value) {
+            records.textRecords[key] = value;
+          }
+        } catch (e) {
+          // Skip unavailable keys
+        }
+      }
+    }
+
+    res.json({
+      ...records,
+      success: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get ENS records',
       message: error.message
     });
   }
@@ -589,9 +703,11 @@ app.get('/', (req, res) => {
       'GET /health': 'Health check',
       'GET /api/ens/resolve/:name': 'Resolve ENS name to address (e.g., vitalik.eth)',
       'GET /api/ens/reverse/:address': 'Reverse lookup: Get ENS name from address',
-      'GET /api/ens/text/:name/:key': 'Get text record (e.g., /api/ens/text/vitalik.eth/url)',
+      'GET /api/ens/text/:name/:key': 'Get text record (e.g., /api/ens/text/vitalik.eth/com.twitter)',
       'GET /api/ens/avatar/:name': 'Get avatar URL for ENS name',
       'GET /api/ens/info/:name': 'Get comprehensive ENS information',
+      'GET /api/ens/contenthash/:name': 'Get contenthash (IPFS/IPNS/Swarm) for ENS name',
+      'GET /api/ens/records/:name': 'Get all ENS records (extended text, contenthash, avatar)',
       'GET /api/risk/address/:address': 'Check if address is flagged (ScamSniffer)',
       'GET /api/cron/scamsniffer-sync': 'Cron: sync ScamSniffer blacklist (Bearer CRON_SECRET)',
       'POST /api/graph/interaction': 'Record a wallet interaction edge',
@@ -601,9 +717,11 @@ app.get('/', (req, res) => {
     examples: {
       resolve: '/api/ens/resolve/vitalik.eth',
       reverse: '/api/ens/reverse/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
-      text: '/api/ens/text/vitalik.eth/url',
+      text: '/api/ens/text/vitalik.eth/com.twitter',
       avatar: '/api/ens/avatar/vitalik.eth',
       info: '/api/ens/info/vitalik.eth',
+      contenthash: '/api/ens/contenthash/vitalik.eth',
+      records: '/api/ens/records/vitalik.eth',
       risk: '/api/risk/address/0x...',
       graph: '/api/graph/address/0x...'
     }

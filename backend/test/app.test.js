@@ -17,8 +17,17 @@ const testProvider = {
   },
   getResolver: async () => ({
     address: '0x0000000000000000000000000000000000000000',
-    getText: async () => 'https://vitalik.ca/',
+    getText: async (key) => {
+      const records = {
+        url: 'https://vitalik.ca/',
+        'com.twitter': 'VitalikButerin',
+        'com.github': 'vbuterin',
+        description: 'Ethereum co-founder',
+      };
+      return records[key] || null;
+    },
     getAvatar: async () => ({ url: 'https://example.com/avatar.png' }),
+    getContentHash: async () => 'ipfs://QmRAQB6YaCyidP37UdDnjFY5vQuiBrcqdyoW1CuDgwxkD4',
   }),
 };
 global.__ENSIGHT_TEST_PROVIDER__ = testProvider;
