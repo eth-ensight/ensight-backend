@@ -3,6 +3,7 @@ const { ethers } = require('ethers');
 const cors = require('cors');
 const redisModule = require('./lib/redis');
 const { validateName, validateAddress, normalizeName, STANDARD_TEXT_KEYS, EXTENDED_TEXT_KEYS } = require('./lib/ens');
+const { ensCache } = require('./lib/cache');
 let redis = redisModule.redis;
 let redisConfigured = redisModule.isConfigured;
 if (global.__ENSIGHT_TEST_REDIS__) {
@@ -51,7 +52,12 @@ app.get('/api/ens/resolve/:name', async (req, res) => {
       return res.status(400).json({ error });
     }
 
-    const address = await provider.resolveName(normalized);
+    const cacheKey = `resolve:${normalized}`;
+    let address = ensCache.get(cacheKey);
+    if (address === undefined) {
+      address = await provider.resolveName(normalized);
+      if (address) ensCache.set(cacheKey, address);
+    }
 
     if (!address) {
       return res.status(404).json({
@@ -85,17 +91,27 @@ app.get('/api/ens/reverse/:address', async (req, res) => {
     }
     const address = req.params.address;
 
-    const name = await provider.lookupAddress(address);
+    const cacheKey = `reverse:${address.toLowerCase()}`;
+    let cached = ensCache.get(cacheKey);
+    let name, isVerified;
 
-    if (!name) {
-      return res.status(404).json({
-        error: `No ENS name found for address "${address}"`
-      });
+    if (cached) {
+      name = cached.name;
+      isVerified = cached.verified;
+    } else {
+      name = await provider.lookupAddress(address);
+
+      if (!name) {
+        return res.status(404).json({
+          error: `No ENS name found for address "${address}"`
+        });
+      }
+
+      // Verify the reverse resolution
+      const verifiedAddress = await provider.resolveName(name);
+      isVerified = verifiedAddress?.toLowerCase() === address.toLowerCase();
+      ensCache.set(cacheKey, { name, verified: isVerified });
     }
-
-    // Verify the reverse resolution
-    const verifiedAddress = await provider.resolveName(name);
-    const isVerified = verifiedAddress?.toLowerCase() === address.toLowerCase();
 
     res.json({
       address,
@@ -369,6 +385,88 @@ app.get('/api/ens/records/:name', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get ENS records',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * Batch ENS resolution — resolve multiple names and/or addresses in a single request.
+ * POST /api/ens/batch
+ * Body: { names?: string[], addresses?: string[] }
+ * Returns: { results: { names: {...}, addresses: {...} }, success: true }
+ *
+ * Limited to 20 items per array to prevent abuse.
+ */
+const BATCH_LIMIT = 20;
+
+app.post('/api/ens/batch', async (req, res) => {
+  try {
+    const { names = [], addresses = [] } = req.body || {};
+
+    if (!Array.isArray(names) || !Array.isArray(addresses)) {
+      return res.status(400).json({ error: '"names" and "addresses" must be arrays' });
+    }
+
+    if (names.length > BATCH_LIMIT || addresses.length > BATCH_LIMIT) {
+      return res.status(400).json({
+        error: `Maximum ${BATCH_LIMIT} items per array`
+      });
+    }
+
+    const results = { names: {}, addresses: {} };
+
+    // Resolve names → addresses
+    for (const rawName of names) {
+      const { valid, normalized } = validateName(rawName);
+      if (!valid) {
+        results.names[rawName] = { address: null, error: 'invalid name' };
+        continue;
+      }
+      try {
+        const cacheKey = `resolve:${normalized}`;
+        let address = ensCache.get(cacheKey);
+        if (address === undefined) {
+          address = await provider.resolveName(normalized);
+          if (address) ensCache.set(cacheKey, address);
+        }
+        results.names[normalized] = { address: address || null };
+      } catch (e) {
+        results.names[normalized] = { address: null, error: e.message };
+      }
+    }
+
+    // Reverse-resolve addresses → names
+    for (const addr of addresses) {
+      if (!ethers.isAddress(addr)) {
+        results.addresses[addr] = { name: null, error: 'invalid address' };
+        continue;
+      }
+      try {
+        const cacheKey = `reverse:${addr.toLowerCase()}`;
+        let cached = ensCache.get(cacheKey);
+        if (cached) {
+          results.addresses[addr] = { name: cached.name, verified: cached.verified };
+        } else {
+          const name = await provider.lookupAddress(addr);
+          if (name) {
+            const verifiedAddress = await provider.resolveName(name);
+            const verified = verifiedAddress?.toLowerCase() === addr.toLowerCase();
+            ensCache.set(cacheKey, { name, verified });
+            results.addresses[addr] = { name, verified };
+          } else {
+            results.addresses[addr] = { name: null };
+          }
+        }
+      } catch (e) {
+        results.addresses[addr] = { name: null, error: e.message };
+      }
+    }
+
+    res.json({ results, success: true });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to process batch ENS resolution',
       message: error.message
     });
   }
@@ -708,6 +806,7 @@ app.get('/', (req, res) => {
       'GET /api/ens/info/:name': 'Get comprehensive ENS information',
       'GET /api/ens/contenthash/:name': 'Get contenthash (IPFS/IPNS/Swarm) for ENS name',
       'GET /api/ens/records/:name': 'Get all ENS records (extended text, contenthash, avatar)',
+      'POST /api/ens/batch': 'Batch resolve names and/or addresses (max 20 each)',
       'GET /api/risk/address/:address': 'Check if address is flagged (ScamSniffer)',
       'GET /api/cron/scamsniffer-sync': 'Cron: sync ScamSniffer blacklist (Bearer CRON_SECRET)',
       'POST /api/graph/interaction': 'Record a wallet interaction edge',
